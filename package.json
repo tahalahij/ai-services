@@ -1,0 +1,10 @@
+{
+  "name": "resume-pdf-service",
+  "type": "module",
+  "scripts":{
+  "start": "bun run server.ts"
+  },
+  "dependencies": {
+    "puppeteer": "^22.0.0"
+  }
+}
