@@ -4,7 +4,12 @@
   "scripts":{
   "start": "bun run server.ts"
   },
+  "devDependencies": {
+    "bun-types": "latest"
+  },
   "dependencies": {
-    "puppeteer": "^22.0.0"
+    "puppeteer": "^22.0.0",
+    "@aws-sdk/client-s3": "3.1",
+    "zod": "^3.23.0"
   }
 }
