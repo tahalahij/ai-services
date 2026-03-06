@@ -1,10 +1,11 @@
 {
   "name": "resume-pdf-service",
   "type": "module",
-  "scripts":{
-  "start": "bun run server.ts"
+  "scripts": {
+    "start": "bun run server.ts"
   },
   "devDependencies": {
+    "@types/node": "^25.3.5",
     "bun-types": "latest"
   },
   "dependencies": {

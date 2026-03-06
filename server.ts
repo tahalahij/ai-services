@@ -80,11 +80,18 @@ const server = Bun.serve({
             return new Response("Not Found", { status: 404 });
         }
 
+        const requestId = crypto.randomUUID().slice(0, 8);
+        const log = (msg: string, data?: Record<string, unknown>) =>
+            console.log(JSON.stringify({ requestId, ts: new Date().toISOString(), msg, ...data }));
+
         try {
+            log("request received", { method: req.method, url: req.url });
+
             const body = await req.json();
             const parsed = RequestBodySchema.safeParse(body);
 
             if (!parsed.success) {
+                log("validation failed", { errors: parsed.error.flatten() });
                 return new Response(
                     JSON.stringify({ error: "Invalid request body", details: parsed.error.flatten() }),
                     { status: 400, headers: { "Content-Type": "application/json" } }
@@ -92,16 +99,17 @@ const server = Bun.serve({
             }
 
             const { username, resume } = parsed.data;
-
-            const html = generateHTML(resume);
+            log("launching browser", { username });
 
             const browser = await puppeteer.launch({
-                headless: "new",
+                headless: true,
                 args: ["--no-sandbox", "--disable-setuid-sandbox"]
             });
 
+            const html = generateHTML(resume);
             const page = await browser.newPage();
             await page.setContent(html, { waitUntil: "networkidle0" });
+            log("html rendered");
 
             const pdfBuffer = await page.pdf({
                 format: "A4",
@@ -109,8 +117,11 @@ const server = Bun.serve({
             });
 
             await browser.close();
+            log("pdf generated", { bytes: pdfBuffer.byteLength });
 
             const key = `resumes/${username}.pdf`;
+            log("uploading to r2", { key, bucket: process.env.R2_BUCKET_NAME });
+
             await r2.send(new PutObjectCommand({
                 Bucket: process.env.R2_BUCKET_NAME!,
                 Key: key,
@@ -119,6 +130,7 @@ const server = Bun.serve({
             }));
 
             const url = `${process.env.R2_PUBLIC_URL}/${key}`;
+            log("upload complete", { url });
 
             return new Response(
                 JSON.stringify({ url }),
@@ -126,10 +138,11 @@ const server = Bun.serve({
             );
 
         } catch (err) {
-            console.error(err);
+            const detail = err instanceof Error ? { message: err.message, stack: err.stack } : { raw: String(err) };
+            console.error(JSON.stringify({ requestId, ts: new Date().toISOString(), msg: "unhandled error", ...detail }));
             return new Response(
-                JSON.stringify({ error: "PDF generation failed" }),
-                { status: 500 }
+                JSON.stringify({ error: "PDF generation failed", detail: err instanceof Error ? err.message : String(err) }),
+                { status: 500, headers: { "Content-Type": "application/json" } }
             );
         }
     }
