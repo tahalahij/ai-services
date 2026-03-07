@@ -2,12 +2,40 @@ import puppeteer from "puppeteer";
 import { z } from "zod";
 import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
 
+function getEnvValue(...keys: string[]) {
+    for (const key of keys) {
+        const value = process.env[key];
+        if (typeof value === "string") {
+            const trimmed = value.trim();
+            if (trimmed.length > 0) return trimmed;
+        }
+    }
+
+    return undefined;
+}
+
+function requireEnvValue(label: string, ...keys: string[]) {
+    const value = getEnvValue(...keys);
+    if (!value) {
+        throw new Error(`Missing required env var for ${label}. Expected one of: ${keys.join(", ")}`);
+    }
+
+    return value;
+}
+
+const R2_ACCOUNT_ID = requireEnvValue("R2 account id", "R2_ACCOUNT_ID", "ACCOUNT_ID", "account_id");
+const R2_ACCESS_KEY_ID = requireEnvValue("R2 access key id", "R2_ACCESS_KEY_ID", "ACCESS_KEY_ID", "access_key_id");
+const R2_SECRET_ACCESS_KEY = requireEnvValue("R2 secret access key", "R2_SECRET_ACCESS_KEY", "SECRET_ACCESS_KEY", "secret_access_key");
+const R2_BUCKET_NAME = requireEnvValue("R2 bucket name", "R2_BUCKET_NAME", "BUCKET_NAME", "bucket_name");
+const R2_PUBLIC_URL = requireEnvValue("R2 public url", "R2_PUBLIC_URL", "PUBLIC_URL", "public_url").replace(/\/$/, "");
+
 const r2 = new S3Client({
     region: "auto",
-    endpoint: `https://${process.env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
+    endpoint: `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
+    forcePathStyle: true,
     credentials: {
-        accessKeyId: process.env.R2_ACCESS_KEY_ID!,
-        secretAccessKey: process.env.R2_SECRET_ACCESS_KEY!,
+        accessKeyId: R2_ACCESS_KEY_ID,
+        secretAccessKey: R2_SECRET_ACCESS_KEY,
     },
 });
 
@@ -72,11 +100,19 @@ const server = Bun.serve({
     port: process.env.PORT || 3000,
 
     async fetch(req) {
+        const { pathname } = new URL(req.url);
+
+        if (pathname === "/health") {
+            return new Response(JSON.stringify({ status: "ok" }), {
+                headers: { "Content-Type": "application/json" },
+            });
+        }
+
         if (req.method !== "POST") {
             return new Response("Not Found", { status: 404 });
         }
 
-        if (new URL(req.url).pathname !== "/generate") {
+        if (pathname !== "/generate") {
             return new Response("Not Found", { status: 404 });
         }
 
@@ -120,16 +156,16 @@ const server = Bun.serve({
             log("pdf generated", { bytes: pdfBuffer.byteLength });
 
             const key = `resumes/${username}.pdf`;
-            log("uploading to r2", { key, bucket: process.env.R2_BUCKET_NAME });
+            log("uploading to r2", { key, bucket: R2_BUCKET_NAME });
 
             await r2.send(new PutObjectCommand({
-                Bucket: process.env.R2_BUCKET_NAME!,
+                Bucket: R2_BUCKET_NAME,
                 Key: key,
                 Body: pdfBuffer,
                 ContentType: "application/pdf",
             }));
 
-            const url = `${process.env.R2_PUBLIC_URL}/${key}`;
+            const url = `${R2_PUBLIC_URL}/${key}`;
             log("upload complete", { url });
 
             return new Response(
