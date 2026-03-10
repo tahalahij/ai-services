@@ -1,6 +1,6 @@
 import puppeteer from "puppeteer";
 import { z } from "zod";
-import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
+import { PutObjectCommand, S3Client, S3ServiceException } from "@aws-sdk/client-s3";
 
 function getEnvValue(...keys: string[]) {
     for (const key of keys) {
@@ -23,21 +23,51 @@ function requireEnvValue(label: string, ...keys: string[]) {
     return value;
 }
 
+function getBooleanEnvValue(keys: string[], defaultValue = false) {
+    const value = getEnvValue(...keys);
+    if (!value) return defaultValue;
+
+    const normalized = value.toLowerCase();
+    return ["1", "true", "yes", "on"].includes(normalized);
+}
+
+function maskSecret(value: string, visible = 4) {
+    if (value.length <= visible * 2) {
+        return "*".repeat(value.length);
+    }
+
+    return `${value.slice(0, visible)}${"*".repeat(Math.max(4, value.length - visible * 2))}${value.slice(-visible)}`;
+}
+
 const R2_ACCOUNT_ID = requireEnvValue("R2 account id", "R2_ACCOUNT_ID", "ACCOUNT_ID", "account_id");
 const R2_ACCESS_KEY_ID = requireEnvValue("R2 access key id", "R2_ACCESS_KEY_ID", "ACCESS_KEY_ID", "access_key_id");
 const R2_SECRET_ACCESS_KEY = requireEnvValue("R2 secret access key", "R2_SECRET_ACCESS_KEY", "SECRET_ACCESS_KEY", "secret_access_key");
 const R2_BUCKET_NAME = requireEnvValue("R2 bucket name", "R2_BUCKET_NAME", "BUCKET_NAME", "bucket_name");
 const R2_PUBLIC_URL = requireEnvValue("R2 public url", "R2_PUBLIC_URL", "PUBLIC_URL", "public_url").replace(/\/$/, "");
+const R2_ENDPOINT = getEnvValue("R2_ENDPOINT", "S3_ENDPOINT", "AWS_ENDPOINT") ?? `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com`;
+const R2_FORCE_PATH_STYLE = getBooleanEnvValue(["R2_FORCE_PATH_STYLE", "S3_FORCE_PATH_STYLE", "AWS_FORCE_PATH_STYLE"], false);
 
 const r2 = new S3Client({
     region: "auto",
-    endpoint: `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
-    forcePathStyle: true,
+    endpoint: R2_ENDPOINT,
+    forcePathStyle: R2_FORCE_PATH_STYLE,
     credentials: {
         accessKeyId: R2_ACCESS_KEY_ID,
         secretAccessKey: R2_SECRET_ACCESS_KEY,
     },
 });
+
+console.log(JSON.stringify({
+    ts: new Date().toISOString(),
+    msg: "r2 client configured",
+    bucket: R2_BUCKET_NAME,
+    endpoint: R2_ENDPOINT,
+    publicUrl: R2_PUBLIC_URL,
+    forcePathStyle: R2_FORCE_PATH_STYLE,
+    accountIdPreview: maskSecret(R2_ACCOUNT_ID),
+    accessKeyPreview: maskSecret(R2_ACCESS_KEY_ID),
+    secretLength: R2_SECRET_ACCESS_KEY.length,
+}));
 
 const BasicsSchema = z.object({
     full_name: z.string(),
@@ -156,7 +186,12 @@ const server = Bun.serve({
             log("pdf generated", { bytes: pdfBuffer.byteLength });
 
             const key = `resumes/${username}.pdf`;
-            log("uploading to r2", { key, bucket: R2_BUCKET_NAME });
+            log("uploading to r2", {
+                key,
+                bucket: R2_BUCKET_NAME,
+                endpoint: R2_ENDPOINT,
+                forcePathStyle: R2_FORCE_PATH_STYLE,
+            });
 
             await r2.send(new PutObjectCommand({
                 Bucket: R2_BUCKET_NAME,
@@ -174,6 +209,26 @@ const server = Bun.serve({
             );
 
         } catch (err) {
+            if (err instanceof S3ServiceException) {
+                console.error(JSON.stringify({
+                    requestId,
+                    ts: new Date().toISOString(),
+                    msg: "r2 upload failed",
+                    name: err.name,
+                    message: err.message,
+                    bucket: R2_BUCKET_NAME,
+                    endpoint: R2_ENDPOINT,
+                    forcePathStyle: R2_FORCE_PATH_STYLE,
+                    httpStatusCode: err.$metadata?.httpStatusCode,
+                    requestIdFromProvider: err.$metadata?.requestId,
+                    extendedRequestId: err.$metadata?.extendedRequestId,
+                    cfId: err.$metadata?.cfId,
+                    attempts: err.$metadata?.attempts,
+                    totalRetryDelay: err.$metadata?.totalRetryDelay,
+                    stack: err.stack,
+                }));
+            }
+
             const detail = err instanceof Error ? { message: err.message, stack: err.stack } : { raw: String(err) };
             console.error(JSON.stringify({ requestId, ts: new Date().toISOString(), msg: "unhandled error", ...detail }));
             return new Response(
